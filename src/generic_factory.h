@@ -1,23 +1,24 @@
-#ifndef H_GENERIC_FACTORY
-#define H_GENERIC_FACTORY
+#pragma once
+#ifndef CATA_SRC_GENERIC_FACTORY_H
+#define CATA_SRC_GENERIC_FACTORY_H
 
-#include "string_id.h"
-#include "int_id.h"
-
-#include <string>
-#include <unordered_map>
-#include <bitset>
-#include <map>
-#include <set>
-#include <string>
-#include <cassert>
-#include <vector>
 #include <algorithm>
+#include <bitset>
+#include <set>
+#include <unordered_map>
+#include <vector>
 
+#include "assign.h"
+#include "catacharset.h"
 #include "debug.h"
+#include "enum_bitset.h"
+#include "init.h"
+#include "int_id.h"
 #include "json.h"
-#include "color.h"
-#include "translations.h"
+#include "output.h"
+#include "string_id.h"
+#include "units.h"
+#include "wcwidth.h"
 
 /**
 A generic class to store objects identified by a `string_id`.
@@ -43,7 +44,7 @@ can be by it to implement its interface.
 
   `T::load` should load all the members of `T`, except `id` and `was_loaded` (they are
   set by the `generic_factory` before calling `load`). Failures should be reported by
-  trowing an exception (e.g. via `JsonObject::throw_error`).
+  throwing an exception (e.g. via `JsonObject::throw_error`).
 
 ----
 
@@ -63,8 +64,7 @@ The functions can contain more code:
 Optional: implement the other functions used by the DynamicDataLoader: `finalize`,
 `check_consistency`. There is no implementation of them in the generic factory.
 
-`check_consistency` typically goes over all loaded items (@ref generic_factory::all) and checks
-them somehow.
+`check_consistency` typically goes over all loaded items and checks them somehow.
 
 `finalize` typically populates some other data (e.g. some cache) or sets up connection between
 loaded objects of different type.
@@ -79,7 +79,7 @@ std::map<...> some_cache;
 }
 
 template<>
-void string_id<my_class>::load( JsonObject &jo ) {
+void string_id<my_class>::load( const JsonObject &jo ) {
     my_class_factory.load( jo );
 }
 
@@ -114,52 +114,49 @@ class string_id_reader;
 template<typename T>
 class generic_factory
 {
+
+    public:
+        virtual ~generic_factory() = default;
+
+    private:
+        DynamicDataLoader::deferred_json deferred;
+        // generation or "modification count" of this factory
+        // it's incremented when any changes to the inner id containers occur
+        // version value corresponds to the string_id::_version,
+        // so incrementing the version here effectively invalidates all cached string_id::_cid
+        int64_t  version = 0;
+
+        void inc_version() {
+            do {
+                version++;
+            } while( version == INVALID_VERSION );
+        }
+
     protected:
         std::vector<T> list;
         std::unordered_map<string_id<T>, int_id<T>> map;
+        std::unordered_map<std::string, T> abstracts;
 
         std::string type_name;
         std::string id_member_name;
         std::string alias_member_name;
-
-        T &load_override( const string_id<T> &id, JsonObject &jo ) {
-            T obj;
-
-            obj.id = id;
-            obj.load( jo );
-            obj.was_loaded = true;
-
-            T &inserted_obj = insert( obj );
-
-            if( !alias_member_name.empty() && jo.has_member( alias_member_name ) ) {
-                const int_id<T> i_id = map[id];
-                std::vector<string_id<T>> aliases;
-
-                mandatory( jo, obj.was_loaded, alias_member_name, aliases, string_id_reader<T> {} );
-
-                for( const auto &alias : aliases ) {
-                    if( map.count( alias ) > 0 ) {
-                        jo.throw_error( "duplicate " + type_name + " alias \"" + alias.str() + "\" in \"" + id.str() +
-                                        "\"" );
-                    }
-                    map[alias] = i_id;
-                }
-            }
-
-            return inserted_obj;
-        }
+        // TEMPORARY until 0.G: Remove "ident" support
+        const std::string legacy_id_member_name = "ident";
 
         bool find_id( const string_id<T> &id, int_id<T> &result ) const {
-            result = id.get_cid();
-            if( is_valid( result ) && list[result].id == id ) {
-                return true;
+            if( id._version == version ) {
+                result = int_id<T>( id._cid );
+                return is_valid( result );
             }
             const auto iter = map.find( id );
+            // map lookup happens at most once per string_id instance per generic_factory::version
+            // id was not found, explicitly marking it as "invalid"
             if( iter == map.end() ) {
+                id.set_cid_version( INVALID_CID, version );
                 return false;
             }
             result = iter->second;
-            id.set_cid( result );
+            id.set_cid_version( result.to_i(), version );
             return true;
         }
 
@@ -170,7 +167,7 @@ class generic_factory
             }
             auto iter = map.begin();
             const auto end = map.end();
-            for( ; iter != end; ) {
+            while( iter != end ) {
                 if( iter->second == i_id && iter->first != id ) {
                     map.erase( iter++ );
                 } else {
@@ -185,16 +182,63 @@ class generic_factory
         /**
          * @param type_name A string used in debug messages as the name of `T`,
          * for example "vehicle type".
-         * @param id_member_name The name of the JSON member that contains the id of the
-         * loaded object.
+         * @param id_member_name The name of the JSON member that contains the id(s) of the
+         * loaded object(s).
+         * @param alias_member_name Alternate names of the JSON member that contains the id(s) of the
+         * loaded object alias(es).
          */
         generic_factory( const std::string &type_name, const std::string &id_member_name = "id",
-                         const std::string &alias_member_name = "" )
+                         const std::string &alias_member_name = "alias" )
             : type_name( type_name ),
               id_member_name( id_member_name ),
               alias_member_name( alias_member_name ),
               dummy_obj() {
         }
+
+        /**
+        * Perform JSON inheritance handling for `T def` and returns true if JsonObject is real.
+        *
+        * If the object contains a "copy-from" member the corresponding abstract gets copied if found.
+        *    If abstract is not found, object is added to deferred.
+        * If the object is abstract, it is loaded via `T::load` and added to `abstracts`
+        *
+        * @return true if `jo` is loaded and false if loading is deferred.
+        * @throws JsonError If `jo` is both abstract and real. (contains "abstract" and "id" members)
+        */
+        bool handle_inheritance( T &def, const JsonObject &jo, const std::string &src ) {
+            static const std::string copy_from_member_name( "copy-from" );
+            static const std::string abstract_member_name( "abstract" );
+            if( jo.has_string( copy_from_member_name ) ) {
+                const std::string source = jo.get_string( copy_from_member_name );
+                auto base = map.find( string_id<T>( source ) );
+
+                if( base != map.end() ) {
+                    def = obj( base->second );
+                } else {
+                    auto ab = abstracts.find( source );
+
+                    if( ab != abstracts.end() ) {
+                        def = ab->second;
+                    } else {
+                        def.was_loaded = false;
+                        deferred.emplace_back( jo.str(), src );
+                        return false;
+                    }
+                }
+                def.was_loaded = true;
+            }
+
+            if( jo.has_string( abstract_member_name ) ) {
+                if( jo.has_string( id_member_name ) || jo.has_string( legacy_id_member_name ) ) {
+                    jo.throw_error( string_format( "cannot specify both '%s' and '%s'/'%s'",
+                                                   abstract_member_name, id_member_name, legacy_id_member_name ) );
+                }
+                def.load( jo, src );
+                abstracts[jo.get_string( abstract_member_name )] = def;
+            }
+            return true;
+        }
+
         /**
          * Load an object of type T with the data from the given JSON object.
          *
@@ -202,38 +246,81 @@ class generic_factory
          * calling `T::load(jo)` (either on a new object or on an existing object).
          * See class documentation for intended behavior of that function.
          *
-         * @return A reference to the loaded/modified object.
          * @throws JsonError If loading fails for any reason (thrown by `T::load`).
          */
-        T &load( JsonObject &jo ) {
-            const string_id<T> id( jo.get_string( id_member_name ) );
-            const auto iter = map.find( id );
-            const bool exists = iter != map.end();
+        void load( const JsonObject &jo, const std::string &src ) {
+            bool strict = src == "dda";
 
-            // "create" is the default, so the game catches accidental re-definitions of
-            // existing objects.
-            const std::string mode = jo.get_string( "edit-mode", "create" );
-            if( mode == "override" ) {
-                remove_aliases( id );
-                return load_override( id, jo );
+            static const std::string abstract_member_name( "abstract" );
 
-            } else if( mode == "modify" ) {
-                if( !exists ) {
-                    jo.throw_error( "missing definition of " + type_name + " \"" + id.str() + "\" to be modified",
-                                    id_member_name );
+            T def;
+
+            if( !handle_inheritance( def, jo, src ) ) {
+                return;
+            }
+            if( jo.has_string( id_member_name ) ) {
+                def.id = string_id<T>( jo.get_string( id_member_name ) );
+                def.load( jo, src );
+                insert( def );
+
+                if( jo.has_member( alias_member_name ) ) {
+                    std::set<string_id<T>> aliases;
+                    assign( jo, alias_member_name, aliases, strict );
+
+                    const int_id<T> ref = map[def.id];
+                    for( const auto &e : aliases ) {
+                        map[e] = ref;
+                    }
                 }
-                T &obj = list[iter->second];
-                obj.load( jo );
-                return obj;
-            } else if( mode == "create" ) {
-                if( exists ) {
-                    jo.throw_error( "duplicated definition of " + type_name + " \"" + id.str() + "\"", id_member_name );
-                }
-                return load_override( id, jo );
 
-            } else {
-                jo.throw_error( "invalid edit mode, must be \"create\", \"modify\" or \"override\"", "edit-mode" );
-                throw; // dummy, throw_error always throws
+            } else if( jo.has_array( id_member_name ) ) {
+                for( JsonValue e : jo.get_array( id_member_name ) ) {
+                    T def;
+                    if( !handle_inheritance( def, jo, src ) ) {
+                        break;
+                    }
+                    def.id = string_id<T>( e );
+                    def.load( jo, src );
+                    insert( def );
+                }
+                if( jo.has_member( alias_member_name ) ) {
+                    jo.throw_error( string_format( "can not specify '%s' when '%s' is array",
+                                                   alias_member_name, id_member_name ) );
+                }
+
+            } else if( jo.has_string( legacy_id_member_name ) ) {
+                def.id = string_id<T>( jo.get_string( legacy_id_member_name ) );
+                def.load( jo, src );
+                insert( def );
+
+                if( jo.has_member( alias_member_name ) ) {
+                    std::set<string_id<T>> aliases;
+                    assign( jo, alias_member_name, aliases, strict );
+
+                    const int_id<T> ref = map[def.id];
+                    for( const auto &e : aliases ) {
+                        map[e] = ref;
+                    }
+                }
+
+            } else if( jo.has_array( legacy_id_member_name ) ) {
+                for( const JsonValue e : jo.get_array( legacy_id_member_name ) ) {
+                    T def;
+                    if( !handle_inheritance( def, jo, src ) ) {
+                        break;
+                    }
+                    def.id = string_id<T>( e );
+                    def.load( jo, src );
+                    insert( def );
+                }
+                if( jo.has_member( alias_member_name ) ) {
+                    jo.throw_error( string_format( "can not specify '%s' when '%s' is array",
+                                                   alias_member_name, legacy_id_member_name ) );
+                }
+
+            } else if( !jo.has_string( abstract_member_name ) ) {
+                jo.throw_error( string_format( "must specify either '%s' or '%s'/'%s'",
+                                               abstract_member_name, id_member_name, legacy_id_member_name ) );
             }
         }
         /**
@@ -242,11 +329,17 @@ class generic_factory
          * The function returns the actual object reference.
          */
         T &insert( const T &obj ) {
+            // this invalidates `_cid` cache for all previously added string_ids,
+            // but! it's necessary to invalidate cache for all possibly cached "missed" lookups
+            // (lookups for not-yet-inserted elements)
+            // in the common scenario there is no loss of performance, as `finalize` will make cache
+            // for all ids valid again
+            inc_version();
             const auto iter = map.find( obj.id );
             if( iter != map.end() ) {
-                T &result = list[iter->second];
+                T &result = list[iter->second.to_i()];
                 result = obj;
-                result.id.set_cid( iter->second );
+                result.id.set_cid_version( iter->second.to_i(), version );
                 return result;
             }
 
@@ -254,10 +347,22 @@ class generic_factory
             list.push_back( obj );
 
             T &result = list.back();
-            result.id.set_cid( cid );
+            result.id.set_cid_version( cid.to_i(), version );
             map[result.id] = cid;
             return result;
         }
+
+        /** Finalize all entries (derived classes should chain to this method) */
+        virtual void finalize() {
+            DynamicDataLoader::get_instance().load_deferred( deferred );
+            abstracts.clear();
+
+            inc_version();
+            for( size_t i = 0; i < list.size(); i++ ) {
+                list[i].id.set_cid_version( static_cast<int>( i ), version );
+            }
+        }
+
         /**
          * Checks loaded/inserted objects for consistency
          */
@@ -285,6 +390,7 @@ class generic_factory
         void reset() {
             list.clear();
             map.clear();
+            inc_version();
         }
         /**
          * Returns all the loaded objects. It can be used to iterate over them.
@@ -309,10 +415,10 @@ class generic_factory
          */
         const T &obj( const int_id<T> &id ) const {
             if( !is_valid( id ) ) {
-                debugmsg( "invalid %s id \"%d\"", type_name.c_str(), id );
+                debugmsg( "invalid %s id \"%d\"", type_name, id.to_i() );
                 return dummy_obj;
             }
-            return list[id];
+            return list[id.to_i()];
         }
         /**
          * Returns the object with the given id.
@@ -324,17 +430,17 @@ class generic_factory
         const T &obj( const string_id<T> &id ) const {
             int_id<T> i_id;
             if( !find_id( id, i_id ) ) {
-                debugmsg( "invalid %s id \"%s\"", type_name.c_str(), id.c_str() );
+                debugmsg( "invalid %s id \"%s\"", type_name, id.c_str() );
                 return dummy_obj;
             }
-            return list[i_id];
+            return list[i_id.to_i()];
         }
         /**
          * Checks whether the factory contains an object with the given id.
          * This function can be used to implement @ref int_id::is_valid().
          */
         bool is_valid( const int_id<T> &id ) const {
-            return static_cast<size_t>( id ) < list.size();
+            return id.to_i() >= 0 && static_cast<size_t>( id.to_i() ) < list.size();
         }
         /**
          * Checks whether the factory contains an object with the given id.
@@ -346,13 +452,17 @@ class generic_factory
         }
         /**
          * Converts string_id<T> to int_id<T>. Returns null_id on failure.
+         * When optional flag warn is true, issues a warning if `id` is not found and null_id was returned.
          */
-        int_id<T> convert( const string_id<T> &id, const int_id<T> &null_id ) const {
+        int_id<T> convert( const string_id<T> &id, const int_id<T> &null_id,
+                           const bool warn = true ) const {
             int_id<T> result;
             if( find_id( id, result ) ) {
                 return result;
             }
-            debugmsg( "invalid %s id \"%s\"", type_name.c_str(), id.c_str() );
+            if( warn ) {
+                debugmsg( "invalid %s id \"%s\"", type_name, id.c_str() );
+            }
             return null_id;
         }
         /**
@@ -362,6 +472,38 @@ class generic_factory
             return obj( id ).id;
         }
         /**@}*/
+
+        /**
+         * Wrapper around generic_factory::version.
+         * Allows to have local caches that invalidate when corresponding generic factory invalidates.
+         * Note: when created using it's default constructor, Version is guaranteed to be invalid.
+        */
+        class Version
+        {
+                friend generic_factory<T>;
+            public:
+                Version() = default;
+            private:
+                Version( int64_t version ) : version( version ) {}
+                int64_t  version = -1;
+            public:
+                bool operator==( const Version &rhs ) const {
+                    return version == rhs.version;
+                }
+                bool operator!=( const Version &rhs ) const {
+                    return !( rhs == *this );
+                }
+        };
+
+        // current version of this generic_factory
+        Version get_version() {
+            return Version( version );
+        }
+
+        // checks whether given version is the same as current version of this generic_factory
+        bool is_valid( const Version &v ) {
+            return v.version == version;
+        }
 };
 
 /**
@@ -376,8 +518,8 @@ Loading (inside a `T::load(JsonObject &jo)` function) can be done with two funct
   value that will be used if the JSON data does not contain the requested data. It may
   throw an error if the existing data is not valid (e.g. string instead of requested int).
 
-The functions are designed to work with the `generic_factory` and therefor support the
-`was_loaded` parameter (set be `generic_factory::load`). If that parameter is `true`, it
+The functions are designed to work with the `generic_factory` and therefore support the
+`was_loaded` parameter (set by `generic_factory::load`). If that parameter is `true`, it
 is assumed the object has already been loaded and missing JSON data is simply ignored
 (the default value is not applied and no error is thrown upon missing mandatory data).
 
@@ -415,7 +557,6 @@ class Dummy2 {
     nc_color c;
     void load(JsonObject &jo) {
         mandatory(jo, was_loaded, "b", b); // uses JsonIn::read(int&)
-        mandatory(jo, was_loaded, "c", c, color_reader);
     }
 };
 \endcode
@@ -426,7 +567,7 @@ value, a default initialized object of the member type will be used instead.
 ----
 
 Readers must provide the following function:
-`bool operator()( JsonObject &jo, const std::string &member_name, T &member, bool was_loaded ) const
+`bool operator()( const JsonObject &jo, const std::string &member_name, T &member, bool was_loaded ) const
 
 (This can be implemented as free function or as operator in a class.)
 
@@ -440,28 +581,36 @@ data), it should throw.
 /** @name Implementation of `mandatory` and `optional`. */
 /**@{*/
 template<typename MemberType>
-inline void mandatory( JsonObject &jo, const bool was_loaded, const std::string &name,
+inline void mandatory( const JsonObject &jo, const bool was_loaded, const std::string &name,
                        MemberType &member )
 {
     if( !jo.read( name, member ) ) {
         if( !was_loaded ) {
-            jo.throw_error( "missing mandatory member \"" + name + "\"" );
+            if( jo.has_member( name ) ) {
+                jo.throw_error( "failed to read mandatory member \"" + name + "\"" );
+            } else {
+                jo.throw_error( "missing mandatory member \"" + name + "\"" );
+            }
         }
     }
 }
 template<typename MemberType, typename ReaderType>
-inline void mandatory( JsonObject &jo, const bool was_loaded, const std::string &name,
+inline void mandatory( const JsonObject &jo, const bool was_loaded, const std::string &name,
                        MemberType &member, const ReaderType &reader )
 {
     if( !reader( jo, name, member, was_loaded ) ) {
         if( !was_loaded ) {
-            jo.throw_error( "missing mandatory member \"" + name + "\"" );
+            if( jo.has_member( name ) ) {
+                jo.throw_error( "failed to read mandatory member \"" + name + "\"" );
+            } else {
+                jo.throw_error( "missing mandatory member \"" + name + "\"" );
+            }
         }
     }
 }
 
 template<typename MemberType>
-inline void optional( JsonObject &jo, const bool was_loaded, const std::string &name,
+inline void optional( const JsonObject &jo, const bool was_loaded, const std::string &name,
                       MemberType &member )
 {
     if( !jo.read( name, member ) ) {
@@ -482,7 +631,7 @@ otherwise it is assumed to be the reader.
 */
 template<typename MemberType, typename DefaultType = MemberType,
          typename = typename std::enable_if<std::is_constructible<MemberType, const DefaultType &>::value>::type>
-inline void optional( JsonObject &jo, const bool was_loaded, const std::string &name,
+inline void optional( const JsonObject &jo, const bool was_loaded, const std::string &name,
                       MemberType &member, const DefaultType &default_value )
 {
     if( !jo.read( name, member ) ) {
@@ -494,7 +643,7 @@ inline void optional( JsonObject &jo, const bool was_loaded, const std::string &
 template < typename MemberType, typename ReaderType, typename DefaultType = MemberType,
            typename = typename std::enable_if <
                !std::is_constructible<MemberType, const ReaderType &>::value >::type >
-inline void optional( JsonObject &jo, const bool was_loaded, const std::string &name,
+inline void optional( const JsonObject &jo, const bool was_loaded, const std::string &name,
                       MemberType &member, const ReaderType &reader )
 {
     if( !reader( jo, name, member, was_loaded ) ) {
@@ -504,7 +653,7 @@ inline void optional( JsonObject &jo, const bool was_loaded, const std::string &
     }
 }
 template<typename MemberType, typename ReaderType, typename DefaultType = MemberType>
-inline void optional( JsonObject &jo, const bool was_loaded, const std::string &name,
+inline void optional( const JsonObject &jo, const bool was_loaded, const std::string &name,
                       MemberType &member, const ReaderType &reader, const DefaultType &default_value )
 {
     if( !reader( jo, name, member, was_loaded ) ) {
@@ -515,27 +664,11 @@ inline void optional( JsonObject &jo, const bool was_loaded, const std::string &
 }
 /**@}*/
 
-
-/**
- * Reads a string from JSON and (if not empty) applies the translation function to it.
- */
-inline bool translated_string_reader( JsonObject &jo, const std::string &member_name,
-                                      std::string &member, bool )
-{
-    if( !jo.read( member_name, member ) ) {
-        return false;
-    }
-    if( !member.empty() ) {
-        member = _( member.c_str() );
-    }
-    return true;
-}
-
 /**
  * Reads a string and stores the first byte of it in `sym`. Throws if the input contains more
  * or less than one byte.
  */
-inline bool one_char_symbol_reader( JsonObject &jo, const std::string &member_name, long &sym,
+inline bool one_char_symbol_reader( const JsonObject &jo, const std::string &member_name, int &sym,
                                     bool )
 {
     std::string sym_as_string;
@@ -546,6 +679,31 @@ inline bool one_char_symbol_reader( JsonObject &jo, const std::string &member_na
         jo.throw_error( member_name + " must be exactly one ASCII character", member_name );
     }
     sym = sym_as_string.front();
+    return true;
+}
+
+/**
+ * Reads a UTF-8 string (or int as legacy fallback) and stores Unicode codepoint of it in `symbol`.
+ * Throws if the inputs width is more than one console cell wide.
+ */
+inline bool unicode_codepoint_from_symbol_reader( const JsonObject &jo,
+        const std::string &member_name, uint32_t &member, bool )
+{
+    int sym_as_int;
+    std::string sym_as_string;
+    if( !jo.read( member_name, sym_as_string, false ) ) {
+        // Legacy fallback to integer `sym`.
+        if( !jo.read( member_name, sym_as_int ) ) {
+            return false;
+        } else {
+            sym_as_string = string_from_int( sym_as_int );
+        }
+    }
+    uint32_t sym_as_codepoint = UTF8_getch( sym_as_string );
+    if( mk_wcwidth( sym_as_codepoint ) != 1 ) {
+        jo.throw_error( member_name + " must be exactly one console cell wide", member_name );
+    }
+    member = sym_as_codepoint;
     return true;
 }
 
@@ -577,11 +735,27 @@ struct handler<std::bitset<N>> {
     }
     template<typename T>
     void insert( std::bitset<N> &container, const T &data ) const {
-        container.insert( data );
+        container.set( data );
     }
     template<typename T>
     void erase( std::bitset<N> &container, const T &data ) const {
-        container.erase( data );
+        container.reset( data );
+    }
+    static constexpr bool is_container = true;
+};
+
+template<typename E>
+struct handler<enum_bitset<E>> {
+    void clear( enum_bitset<E> &container ) const {
+        container.reset();
+    }
+    template<typename T>
+    void insert( enum_bitset<E> &container, const T &data ) const {
+        container.set( data );
+    }
+    template<typename T>
+    void erase( enum_bitset<E> &container, const T &data ) const {
+        container.reset( data );
     }
     static constexpr bool is_container = true;
 };
@@ -614,7 +788,7 @@ struct handler<std::vector<T>> {
 /**
  * Base class for reading generic objects from JSON.
  * It can load members being certain containers or being a single value.
- * @ref get_next needs to be implemented to read and convert the data from JSON.
+ * The function get_next() needs to be implemented to read and convert the data from JSON.
  * It uses the curiously recurring template pattern, you have to derive your new class
  * `MyReader` from `generic_typed_reader<MyReader>` and implement `get_next` and
  * optionally `erase_next`.
@@ -625,13 +799,13 @@ struct handler<std::vector<T>> {
  *   and assigned, overriding any existing content of it.
  * - If the object is not new and the member exists, it is read and assigned as well.
  * - If the object is not new and the member does not exists, two further members are examined:
- *   entries from `"add:" + member_name` are added to the set and entries from `"remove:" + member_name`
+ *   entries from `"extend"` are added to the set and entries from `"delete"`
  *   are removed. This only works if the member is actually a container, not just a single value.
  *
  * Example:
  * The JSON `{ "f": ["a","b","c"] }` would be loaded as the set `{"a","b","c"}`.
- * Loading the set again from the JSON `{ "remove:f": ["c","x"], "add:f": ["h"] }` would add the
- * "h" flag and removes the "c" and the "x" flag, resulting in `{"a","b","h"}`.
+ * Loading the set again from the JSON `{ "delete": { "f": ["c","x"] }, "extend": { "f": ["h"] } }`
+ * would add the "h" flag and removes the "c" and the "x" flag, resulting in `{"a","b","h"}`.
  *
  * @tparam Derived The class that inherits from this. It must implement the following:
  *   - `Foo get_next( JsonIn & ) const`: reads the next value from JSON, converts it into some
@@ -649,7 +823,8 @@ class generic_typed_reader
 {
     public:
         template<typename C>
-        void insert_values_from( JsonObject &jo, const std::string &member_name, C &container ) const {
+        void insert_values_from( const JsonObject &jo, const std::string &member_name,
+                                 C &container ) const {
             const Derived &derived = static_cast<const Derived &>( *this );
             if( !jo.has_member( member_name ) ) {
                 return;
@@ -673,7 +848,7 @@ class generic_typed_reader
         }
 
         template<typename C>
-        void erase_values_from( JsonObject &jo, const std::string &member_name, C &container ) const {
+        void erase_values_from( const JsonObject &jo, const std::string &member_name, C &container ) const {
             const Derived &derived = static_cast<const Derived &>( *this );
             if( !jo.has_member( member_name ) ) {
                 return;
@@ -697,13 +872,13 @@ class generic_typed_reader
 
         /**
          * Implements the reader interface, handles members that are containers of flags.
-         * The functions forwards the actual changes to @ref assign, @ref insert
-         * and @ref erase, which are specialized for various container types.
+         * The functions forwards the actual changes to assign(), insert()
+         * and erase(), which are specialized for various container types.
          * The `enable_if` is here to prevent the compiler from considering it
          * when called on a simple data member, the other `operator()` will be used.
          */
         template<typename C, typename std::enable_if<reader_detail::handler<C>::is_container, int>::type = 0>
-        bool operator()( JsonObject &jo, const std::string &member_name,
+        bool operator()( const JsonObject &jo, const std::string &member_name,
                          C &container, bool was_loaded ) const {
             const Derived &derived = static_cast<const Derived &>( *this );
             // If you get an error about "incomplete type 'struct reader_detail::handler...",
@@ -716,8 +891,16 @@ class generic_typed_reader
             } else if( !was_loaded ) {
                 return false;
             } else {
-                derived.erase_values_from( jo, "remove:" + member_name, container );
-                derived.insert_values_from( jo, "add:" + member_name, container );
+                if( jo.has_object( "extend" ) ) {
+                    JsonObject tmp = jo.get_object( "extend" );
+                    tmp.allow_omitted_members();
+                    derived.insert_values_from( tmp, member_name, container );
+                }
+                if( jo.has_object( "delete" ) ) {
+                    JsonObject tmp = jo.get_object( "delete" );
+                    tmp.allow_omitted_members();
+                    derived.erase_values_from( tmp, member_name, container );
+                }
                 return true;
             }
         }
@@ -729,7 +912,7 @@ class generic_typed_reader
         // the caller, which will take action on their own.
         template < typename C, typename std::enable_if < !reader_detail::handler<C>::is_container,
                    int >::type = 0 >
-        bool operator()( JsonObject &jo, const std::string &member_name,
+        bool operator()( const JsonObject &jo, const std::string &member_name,
                          C &member, bool /*was_loaded*/ ) const {
             const Derived &derived = static_cast<const Derived &>( *this );
             if( !jo.has_member( member_name ) ) {
@@ -737,18 +920,6 @@ class generic_typed_reader
             }
             member = derived.get_next( *jo.get_raw( member_name ) );
             return true;
-        }
-};
-
-/**
- * Converts the input string into a `nc_color`.
- */
-class color_reader : public generic_typed_reader<color_reader>
-{
-    public:
-        nc_color get_next( JsonIn &jin ) const {
-            // TODO: check for valid color name
-            return color_from_string( jin.get_string() );
         }
 };
 
@@ -773,6 +944,40 @@ class auto_flags_reader : public generic_typed_reader<auto_flags_reader<FlagType
         }
 };
 
+using string_reader = auto_flags_reader<>;
+
+class volume_reader : public generic_typed_reader<units::volume>
+{
+    public:
+        bool operator()( const JsonObject &jo, const std::string &member_name,
+                         units::volume &member, bool /* was_loaded */ ) const {
+            if( !jo.has_member( member_name ) ) {
+                return false;
+            }
+            member = read_from_json_string<units::volume>( *jo.get_raw( member_name ), units::volume_units );
+            return true;
+        }
+        units::volume get_next( JsonIn &jin ) const {
+            return read_from_json_string<units::volume>( jin, units::volume_units );
+        }
+};
+
+class mass_reader : public generic_typed_reader<units::mass>
+{
+    public:
+        bool operator()( const JsonObject &jo, const std::string &member_name,
+                         units::mass &member, bool /* was_loaded */ ) const {
+            if( !jo.has_member( member_name ) ) {
+                return false;
+            }
+            member = read_from_json_string<units::mass>( *jo.get_raw( member_name ), units::mass_units );
+            return true;
+        }
+        units::mass get_next( JsonIn &jin ) const {
+            return read_from_json_string<units::mass>( jin, units::mass_units );
+        }
+};
+
 /**
  * Uses a map (unordered or standard) to convert strings from JSON to some other type
  * (the mapped type of the map: `C::mapped_type`). It works for all mapped types, not just enums.
@@ -780,36 +985,46 @@ class auto_flags_reader : public generic_typed_reader<auto_flags_reader<FlagType
  * One can use this if the member is `std::set<some_enum>` or `some_enum` and a
  * map `std::map<std::string, some_enum>` with all the value enumeration values exists.
  *
- * The class can be instantiated for a given map `mapping` like this:
- * `typed_flag_reader<decltype(mapping)> reader{ mapping, "error" };`
- * The error string (@ref error_msg) is used when the input contains invalid flags
+ * The class can be conveniently instantiated for a given map `mapping` using
+ * the helper function @ref make_flag_reader (see below).
+ * The flag type (@ref flag_type) is used when the input contains invalid flags
  * (a string that is not contained in the map). It should sound something like
- * "invalid my-enum-type".
+ * "my-enum-type".
  */
-template<typename C>
-class typed_flag_reader : public generic_typed_reader<typed_flag_reader<C>>
+template<typename T>
+class typed_flag_reader : public generic_typed_reader<typed_flag_reader<T>>
 {
-    protected:
-        const C &flag_map;
-        const std::string error_msg;
+    private:
+        using map_t = std::map<std::string, T>;
+
+    private:
+        const map_t &flag_map;
+        const std::string flag_type;
 
     public:
-        typed_flag_reader( const C &m, const std::string &e )
-            : flag_map( m )
-            , error_msg( e ) {
+        typed_flag_reader( const map_t &flag_map, const std::string &flag_type )
+            : flag_map( flag_map )
+            , flag_type( flag_type ) {
         }
 
-        typename C::mapped_type get_next( JsonIn &jin ) const {
-            const auto position = jin.tell();
+        T get_next( JsonIn &jin ) const {
             const std::string flag = jin.get_string();
             const auto iter = flag_map.find( flag );
-            if( iter == flag_map.end() ) {
-                jin.seek( position );
-                jin.error( error_msg + ": \"" + flag + "\"" );
+
+            if( iter == flag_map.cend() ) {
+                jin.seek( jin.tell() );
+                jin.error( string_format( "invalid %s: \"%s\"", flag_type, flag ) );
             }
+
             return iter->second;
         }
 };
+
+template<typename T>
+typed_flag_reader<T> make_flag_reader( const std::map<std::string, T> &m, const std::string &e )
+{
+    return typed_flag_reader<T> { m, e };
+}
 
 /**
  * Uses @ref io::string_to_enum to convert the string from JSON to a C++ enum.
@@ -817,15 +1032,21 @@ class typed_flag_reader : public generic_typed_reader<typed_flag_reader<C>>
 template<typename E>
 class enum_flags_reader : public generic_typed_reader<enum_flags_reader<E>>
 {
+    private:
+        const std::string flag_type;
+
     public:
+        enum_flags_reader( const std::string &flag_type ) : flag_type( flag_type ) {
+        }
+
         E get_next( JsonIn &jin ) const {
-            const auto position = jin.tell();
+            const int position = jin.tell();
             const std::string flag = jin.get_string();
             try {
                 return io::string_to_enum<E>( flag );
             } catch( const io::InvalidEnumString & ) {
                 jin.seek( position );
-                jin.error( "invalid enumeration value: \"" + flag + "\"" );
+                jin.error( string_format( "invalid %s: \"%s\"", flag_type, flag ) );
                 throw; // ^^ throws already
             }
         }
@@ -843,82 +1064,39 @@ class string_id_reader : public generic_typed_reader<string_id_reader<T>>
         }
 };
 
-
-template <typename T>
-typename std::enable_if<std::is_arithmetic<T>::value, bool>::type assign(
-    JsonObject &jo, const std::string &name, T &val, bool strict = false )
+/**
+ * Reads a volume value from legacy format: JSON contains a integer which represents multiples
+ * of `units::legacy_volume_factor` (250 ml).
+ */
+inline bool legacy_volume_reader( const JsonObject &jo, const std::string &member_name,
+                                  units::volume &value, bool )
 {
-    T out;
-    double scalar;
-
-    if( jo.get_object( "relative" ).read( name, out ) ) {
-        out += val;
-
-    } else if( jo.get_object( "proportional" ).read( name, scalar ) ) {
-        if( scalar <= 0 ) {
-            jo.throw_error( "invalid proportional scalar", name );
-        }
-        out = val * scalar;
-
-    } else if( !jo.read( name, out ) ) {
-
+    int legacy_value;
+    if( !jo.read( member_name, legacy_value ) ) {
         return false;
     }
-
-    if( strict && out == val ) {
-        jo.throw_error( "assignment does not update value", name );
-    }
-
-    val = out;
+    value = legacy_value * units::legacy_volume_factor;
     return true;
 }
 
-template <typename T>
-typename std::enable_if<std::is_constructible<T, std::string>::value, bool>::type assign(
-    JsonObject &jo, const std::string &name, T &val, bool = false )
+/**
+ * Only for external use in legacy code where migrating to `class translation`
+ * is impractical. For new code load with `class translation` instead.
+ */
+class text_style_check_reader : public generic_typed_reader<text_style_check_reader>
 {
+    public:
+        enum class allow_object : int {
+            no,
+            yes,
+        };
 
-    return jo.read( name, val );
-}
+        text_style_check_reader( allow_object object_allowed = allow_object::yes );
 
-template <typename T>
-bool assign( JsonObject &jo, const std::string &name, nc_color &val, bool = false )
-{
-    if( jo.has_string( name ) ) {
-        val = color_from_string( jo.get_string( name ) );
-        return true;
-    }
-    return false;
-}
+        std::string get_next( JsonIn &jsin ) const;
 
-template <typename T>
-typename std::enable_if<std::is_constructible<T, std::string>::value, bool>::type assign(
-    JsonObject &jo, const std::string &name, std::set<T> &val, bool = false )
-{
+    private:
+        allow_object object_allowed;
+};
 
-    if( jo.has_string( name ) || jo.has_array( name ) ) {
-        val = jo.get_tags<T>( name );
-        return true;
-    }
-
-    bool res = false;
-
-    auto add = jo.get_object( "extend" );
-    if( add.has_string( name ) || add.has_array( name ) ) {
-        auto tags = add.get_tags<T>( name );
-        val.insert( tags.begin(), tags.end() );
-        res = true;
-    }
-
-    auto del = jo.get_object( "delete" );
-    if( del.has_string( name ) || del.has_array( name ) ) {
-        for( const auto &e : del.get_tags<T>( name ) ) {
-            val.erase( e );
-        }
-        res = true;
-    }
-
-    return res;
-}
-
-#endif
+#endif // CATA_SRC_GENERIC_FACTORY_H

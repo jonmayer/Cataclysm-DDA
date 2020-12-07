@@ -1,47 +1,47 @@
-#ifndef PICKUP_H
-#define PICKUP_H
+#pragma once
+#ifndef CATA_SRC_PICKUP_H
+#define CATA_SRC_PICKUP_H
 
-#include "enums.h"
-
-#include <map>
-#include <list>
 #include <vector>
-#include <string>
 
-class vehicle;
+#include "cuboid_rectangle.h"
+#include "point.h"
+#include "ui.h"
+
+class Character;
 class item;
+class item_location;
+class map;
+struct tripoint;
 
-class Pickup
+namespace Pickup
 {
-    public:
-        static void do_pickup( const tripoint &pickup_target, bool from_vehicle,
-                               std::list<int> &indices, std::list<int> &quantities, bool autopickup );
-        static void pick_up( const tripoint &p, int min ); // Pick up items; ',' or via examine()
+/**
+ * Returns `false` if the player was presented a prompt and decided to cancel the pickup.
+ * `true` in other cases.
+ */
+bool do_pickup( std::vector<item_location> &targets, std::vector<int> &quantities,
+                bool autopickup );
+bool query_thief();
 
-    private:
-        // No instances of Pickup allowed.
-        Pickup() {}
-
-        typedef std::pair<item, int> ItemCount;
-        typedef std::map<std::string, ItemCount> PickupMap;
-
-        // Pickup helper functions
-        static void pick_one_up( const tripoint &pickup_target, item &newit,
-                                 vehicle *veh, int cargo_part, int index, int quantity,
-                                 bool &got_water, bool &offered_swap,
-                                 PickupMap &mapPickup, bool autopickup );
-
-        typedef enum {
-            DONE, ITEMS_FROM_CARGO, ITEMS_FROM_GROUND,
-        } interact_results;
-
-        static interact_results interact_with_vehicle( vehicle *veh, const tripoint &vpos,
-                int veh_root_part );
-
-        static int handle_quiver_insertion( item &here, int &moves_to_decrement, bool &picked_up );
-        static void remove_from_map_or_vehicle( const tripoint &pos, vehicle *veh, int cargo_part,
-                                                int &moves_taken, int curmit );
-        static void show_pickup_message( const PickupMap &mapPickup );
+enum from_where : int {
+    from_cargo = 0,
+    from_ground,
+    prompt
 };
 
-#endif
+/** Pick up items; 'g' or ',' or via examine() */
+void pick_up( const tripoint &p, int min, from_where get_items_from = prompt );
+/** Determines the cost of moving an item by a character. */
+int cost_to_move_item( const Character &who, const item &it );
+
+struct pickup_rect : inclusive_rectangle<point> {
+    pickup_rect() = default;
+    pickup_rect( const point &P_MIN, const point &P_MAX ) : inclusive_rectangle( P_MIN, P_MAX ) {}
+    int cur_it;
+    static std::vector<pickup_rect> list;
+    static pickup_rect *find_by_coordinate( const point &p );
+};
+
+} // namespace Pickup
+#endif // CATA_SRC_PICKUP_H

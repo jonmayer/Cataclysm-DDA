@@ -1,53 +1,146 @@
 # Activities
 
-Activities are long term actions, that can be interrupted and (optionally) continued. This allows the player to react to events (like monsters appearing, getting hurt) while doing something that takes more than just one turn.
+Activities are long term actions, that can be interrupted and (optionally)
+continued. This allows the avatar or an npc to react to events (like
+monsters appearing, getting hurt) while doing something that takes more
+than just one turn.
 
 ## Adding new activities
 
-1. `player_activity.h`: Add an entry to `activity_type`, right before `NUM_ACTIVITIES`.
-2. `player_activity.cpp`: Add a stop phrase in `player_activity::get_stop_phrase` for the new activity. Use the existing phrases as example.
-3. `activity_handlers.h`, `activity_handlers.cpp`: Write a `<activity>_do_turn()` function and/or a `<activity>_finish` function
-4. `player_activity.cpp`: Add a case statement in `player_activity::do_turn` and/or `player_activity::finish` to call the appropriate `activity_handlers` function.
-5. Start the activity by calling `u.assign_activity(ACT_<activity>, ...)`
+1. `player_activities.json` Define properties that apply to all instances
+of the activity in question.
 
-One might also add a case for the new activity in `player_activity::is_suspendable`, `player_activity::is_abortable` (see documentation of those functions for what they do).
+2. `activity_actor.h` Create a new subclass of `activity_actor`
+(e.g. move_items_activity_actor) to store state and handle turns of the
+new activity.
+
+3. `activity_actor.cpp` Define the `start`, `do_turn`, and `finish`
+functions needed for the new actor as well as the required serialization
+functions. Don't forget to add the deserialization function of your new
+activity actor to the `deserialize_functions` map towards the bottom of
+`activity_actor.cpp`. Define `canceled` function if activity modifies
+some complex state that should be restored upon cancellation / interruption.
+
+4. If this activity is resumable, `override` 
+`activity_actor::can_resume_with_internal`
+
+5. Construct your activity actor and then pass it to the constructor for
+`player_activity`. The newly constructed activity can then be assigned
+to the character and started using `Character::assign_activity`.
+
+## JSON Properties
+
+* verb: A descriptive term to describe the activity to be used in the
+query to stop the activity, and strings that describe it, for example:
+`"verb": "mining"` or
+`"verb": { "ctxt": "instrument", "str": "playing" }`.
+
+* suspendable (true): If true, the activity can be continued without
+starting from scratch again. This is only possible if `can_resume_with()`
+returns true.
+
+* rooted (false): If true, then during the activity, recoil is reduced,
+and plant mutants sink their roots into the ground. Should be true if the
+activity lasts longer than a few minutes, and can always be accomplished
+without moving your feet.
+
+* based_on: Can be 'time', 'speed', or 'neither'.
+
+    * time: The amount that `player_activity::moves_left` is
+    decremented by is independent from the character's speed.
+
+    * speed: `player_activity::moves_left` may be decremented faster
+    or slower, depending on the character's speed.
+
+    * neither: `moves_left` will not be decremented. Thus you must
+    define a do_turn function; otherwise the activity will never end!
+
+* interruptable (true): Can this be interrupted.  If false, then popups related
+to e.g. pain or seeing monsters will be suppressed.
+
+* no_resume (false): Rather than resuming, you must always restart the
+activity from scratch.
+
+* multi_activity(false): This activity will repeat until it cannot do
+any more work, used for NPC and avatar zone activities.
+
+* refuel_fires( false ): If true, the character will automatically refuel
+fires during the long activity.
+
+* auto_needs( false ) : If true, the character will automatically eat and
+drink from specific auto_consume zones during long activities.
+
+## Termination
+
+There are several ways an activity can be ended:
+
+1. Call `player_activity::set_to_null()`
+
+    This can be called if it finished early or something went wrong,
+    such as corrupt data, disappearing items, etc. The activity will
+    not be put into the backlog.
+
+2. `moves_left` <= 0
+
+    Once this condition is true, the finish function, if there is one,
+    is called. The finish function should call `set_to_null()`. If
+    there isn't a finish function, `set_to_null()` will be called
+    for you (from activity_actor::do_turn).
+
+3. `Character::cancel_activity`
+
+    Canceling an activity prevents the `activity_actor::finish`
+    function from running, and the activity does therefore not yield a
+    result. Instead, `activity_actor::canceled` is called. If activity is
+    suspendable, a copy of it is written to `Character::backlog`.
 
 ## Notes
 
-An activity is considered finished when `player_activity::moves_left` is at or below 0. One can reach this state either by explicitly setting the value to 0, or over time by decreasing the value each turn.
+While the character performs the activity,
+`activity_actor::do_turn` is called on each turn. Depending on the
+JSON properties, this will do some stuff. It will also call the do_turn
+function, and if `moves_left` is non-positive, the finish function.
 
-Activities can be canceled by calling `game::cancel_activity` or similar. Canceling an activity prevents the `player_activity::finish` function from running, and the activity does therefore not yield a result. `player_activity::finish` is called if the activity is finished normally (`player_activity::moves_left <= 0`).
+Some activities (like playing music on a mp3 player) don't have an end
+result but instead do something each turn (playing music on the mp3
+player decreases its batteries and gives a morale bonus).
 
-Canceling the activity with `game::cancel_activity` allows for resuming the activity as a copy of the activity is written to `player::backlog` (only if `player_activity::is_suspendable()` returns `true`).
+If the activity needs any information during its execution or when
+it's finished (like *where* to do something, *which* item to use to do
+something, ...), simply add data members to your activity actor as well
+as serialization functions for the data so that the activity can persist
+across save/load cycles.
 
-An activity can be stopped by setting `player_activity::type` to `ACT_NULL`, but this does not allow resuming the task. It is usually used to signal that the activity has been finished early.
+Be careful when storing coordinates as the activity may be carried out
+by NPCS. If its, the coordinates must be absolute not local as local
+coordinates are based on the avatars position.
 
-While the player character performs the activity, `player_activity::do_turn` is called on each turn. This functions calls some activity specific functions and decrements `player_activity::moves_left`, so it will eventually reach 0.
+### `activity_actor::start`
 
-Some activities (like playing on a PDA) don't have an end result but instead do something each turn (playing on the PDA decreases its batteries and gives a morale bonus).
+This function is called exactly once when the activity
+is assigned to a character. It is useful for setting
+`player_activity::moves_left`/`player_activity::moves_total` in the case
+of an activity based on time or speed.
 
-If the activity needs any information during its execution or when it's finished (like *where* to do something, *which* item to use to do something, ...), use any of:
+### `activity_actor::do_turn`
 
-- `player_activity::index` - what to do (which recipe to craft, ...)
-- `player_activity::position` - item position in player's inventory (`player::i_at`)
-- `player_activity::name` - name of something to do (skill to be trained)
-- `player_activity::values` - vector of any `int` values
-- `player_activity::str_values` - vector of any `std::string` values
-- `player_activity::placement` - where to do something
+To prevent an infinite loop, ensure that one of the following is
+satisfied:
 
-Those values are automatically saved and restored when loading a game. Other than that they are not changed/examined by any common code. Different types of activities can use them however they need to.
+- The `based_on` JSON property is `speed` or `time`
 
-### `activity_handlers::<activity>_do_turn` function
+- The `player_activity::moves_left` is decreased in `do_turn`
 
-Make sure that either:
+- The the activity is stopped in `do_turn`  (see 'Termination' above)
 
-- `player_activity::moves_left` is decreased (in `<activity>_do_turn` or directly in `player_activity::do_turn`),
-- Or that the activity is stopped there
+For example, `move_items_activity_actor::do_turn` will either move as
+many items as possible given the character's current moves or, if there
+are no target items remaining, terminate the activity.
 
-For example the pulp activity finishes itself when there are no more unpulped corpses on the map. It therefore does not need to decrease `player_activity::moves_left` on each turn.
+### `activity_actor::finish`
 
-One can decrease `player_activity::moves_left` either by `player::moves`, which makes the duration of the activity dependent on the player character's **speed**, or one can decrease it by a fixed value, which makes the activity take a specific amount of **time**, independent of the character's speed. This is done for example with the wait activity.
-
-### `activity_handlers::<activity>_finish` function
-
-This function is called when the activity has been completed. It must set the `player_activity::type` to `ACT_NULL` (or assign a new activity). One should not call `cancel_activity` for the finished activity, as this could make a copy of the activity in `player::backlog`, which allows resuming an already finished activity.
+This function is called when the activity has been completed
+(`moves_left` <= 0). It must call `player_activity::set_to_null()` or
+assign a new activity. One should not call `Character::cancel_activity`
+for the finished activity, as this could make a copy of the activity in
+`Character::backlog`, which allows resuming an already finished activity.

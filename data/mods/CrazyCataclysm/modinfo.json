@@ -1,26 +1,28 @@
 [
   {
     "type": "MOD_INFO",
-    "mod_type": "SUPPLEMENTAL",
-    "ident": "crazy_cataclysm",
+    "id": "crazy_cataclysm",
     "name": "Crazy Cataclysm",
-    "description": "Want a little crazy in your Cataclysm? Try this one.",
-    "author": "Kevin",
+    "authors": [ "Kevin" ],
+    "description": "Want a little crazy in your Cataclysm?  Try this one.",
     "category": "misc_additions",
-    "path": ""
-  },{
-    "type" : "ITEM_WHITELIST",
-    "items" : [
-      "granade",
-      "jacqueshammer"
-    ]
-  },{
-    "type" : "MONSTER_WHITELIST",
-    "monsters" : [
+    "dependencies": [ "dda" ]
+  },
+  {
+    "type": "MONSTER_WHITELIST",
+    "monsters": [
       "mon_zombie_dancer",
       "mon_zombie_jackson",
       "mon_shia",
-      "mon_bear_smoky"
+      "mon_bear_smoky",
+      "mon_zombie_skeltal",
+      "mon_zombie_skeltal_minion"
     ]
+  },
+  {
+    "type": "EXTERNAL_OPTION",
+    "name": "CRAZY",
+    "stype": "bool",
+    "value": true
   }
 ]

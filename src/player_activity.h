@@ -1,115 +1,124 @@
-#ifndef PLAYER_ACTIVITY_H
-#define PLAYER_ACTIVITY_H
-
-#include "enums.h"
-#include "json.h"
+#pragma once
+#ifndef CATA_SRC_PLAYER_ACTIVITY_H
+#define CATA_SRC_PLAYER_ACTIVITY_H
 
 #include <climits>
+#include <cstddef>
+#include <memory>
+#include <set>
+#include <string>
+#include <unordered_set>
 #include <vector>
 
-enum activity_type : int {    // expanded this enum for readability
-    ACT_NULL = 0,
-    ACT_RELOAD,
-    ACT_READ,
-    ACT_GAME,
-    ACT_WAIT,
-    ACT_CRAFT,
-    ACT_LONGCRAFT,
-    ACT_DISASSEMBLE,
-    ACT_BUTCHER,
-    ACT_LONGSALVAGE,
-    ACT_FORAGE,
-    ACT_BUILD,
-    ACT_VEHICLE,
-    ACT_REFILL_VEHICLE, // not used anymore.
-    ACT_TRAIN,
-    ACT_WAIT_WEATHER,
-    ACT_FIRSTAID,
-    ACT_FISH,
-    ACT_PICKAXE,
-    ACT_BURROW,
-    ACT_PULP,
-    ACT_VIBE,
-    ACT_MAKE_ZLAVE,
-    ACT_DROP,
-    ACT_STASH,
-    ACT_PICKUP,
-    ACT_MOVE_ITEMS,
-    ACT_ADV_INVENTORY,
-    ACT_ARMOR_LAYERS,
-    ACT_START_FIRE,
-    ACT_OPEN_GATE,
-    ACT_FILL_LIQUID,
-    ACT_HOTWIRE_CAR,
-    ACT_AIM,
-    ACT_ATM,
-    ACT_START_ENGINES,
-    ACT_OXYTORCH,
-    ACT_CRACKING,
-    ACT_REPAIR_ITEM,
-    ACT_MEND_ITEM,
-    ACT_GUNMOD_ADD,
-    ACT_WAIT_NPC,
-    NUM_ACTIVITIES
-};
+#include "activity_actor.h"
+#include "clone_ptr.h"
+#include "enums.h"
+#include "item_location.h"
+#include "memory_fast.h"
+#include "optional.h"
+#include "point.h"
+#include "string_id.h"
+#include "type_id.h"
 
-class player;
 class Character;
+class JsonIn;
+class JsonOut;
+class avatar;
+class monster;
+class player;
+class translation;
 
-class player_activity : public JsonSerializer, public JsonDeserializer
+class player_activity
 {
     private:
-        void finish( player *p );
+        activity_id type;
+        cata::clone_ptr<activity_actor> actor;
+
+        std::set<distraction_type> ignored_distractions;
+
     public:
-        /** The type of this activity. */
-        activity_type type;
         /** Total number of moves required to complete the activity */
-        int moves_total;
+        int moves_total = 0;
         /** The number of moves remaining in this activity before it is complete. */
-        int moves_left;
-        /** An activity specific value. */
-        int index;
-        /** An activity specific value. */
-        int position;
-        /** An activity specific value. */
+        int moves_left = 0;
+        /** Controls whether this activity can be cancelled at all */
+        bool interruptable = true;
+        /** Controls whether this activity can be cancelled with 'pause' action */
+        bool interruptable_with_kb = true;
+
+        // The members in the following block are deprecated, prefer creating a new
+        // activity_actor.
+        int index = 0;
+        /**
+         *   An activity specific value.
+         *   DO NOT USE FOR ITEM INDEX
+        */
+        int position = 0;
         std::string name;
-        bool ignore_trivial;
+        std::vector<item_location> targets;
         std::vector<int> values;
         std::vector<std::string> str_values;
         std::vector<tripoint> coords;
+        std::unordered_set<tripoint> coord_set;
+        std::vector<weak_ptr_fast<monster>> monsters;
         tripoint placement;
-        /** If true, the player has been warned of dangerously close monsters with
-         * respect to this activity.
-         */
-        bool warned_of_proximity;
+
+        bool no_drink_nearby_for_auto_consume = false;
+        bool no_food_nearby_for_auto_consume = false;
         /** If true, the activity will be auto-resumed next time the player attempts
          *  an identical activity. This value is set dynamically.
          */
-        bool auto_resume;
+        bool auto_resume = false;
 
-        player_activity( activity_type t = ACT_NULL, int turns = 0, int Index = -1, int pos = INT_MIN,
-                         std::string name_in = "" );
-        player_activity( player_activity && ) = default;
+        player_activity();
+        // This constructor does not work with activites using the new activity_actor system
+        // TODO: delete this constructor once migration to the activity_actor system is complete
+        player_activity( activity_id, int turns = 0, int Index = -1, int pos = INT_MIN,
+                         const std::string &name_in = "" );
+        /**
+         * Create a new activity with the given actor
+         */
+        player_activity( const activity_actor &actor );
+
+        player_activity( player_activity && ) noexcept = default;
         player_activity( const player_activity & ) = default;
         player_activity &operator=( player_activity && ) = default;
         player_activity &operator=( const player_activity & ) = default;
 
-        // Question to ask when the activity is to be stoped,
+        explicit operator bool() const {
+            return !type.is_null();
+        }
+        bool is_null() const {
+            return type.is_null();
+        }
+        bool is_multi_type() const;
+        /** This replaces the former usage `act.type = ACT_NULL` */
+        void set_to_null();
+
+        // This makes player_activity's activity type inherit activity_actor's activity type,
+        // in order to synchronize both, due to possible variablility of actor's activity type
+        // allowed via override of activity_actor::get_type()
+        void sychronize_type_with_actor();
+
+        const activity_id &id() const {
+            return type;
+        }
+        bool rooted() const;
+
+        // Question to ask when the activity is to be stopped,
         // e.g. "Stop doing something?", already translated.
-        const std::string &get_stop_phrase() const;
-        /**
-         * If this returns true, the activity can be aborted with
-         * the ACTION_PAUSE key (see game::handle_key_blocking_activity)
-         */
-        bool is_abortable() const;
-        /**
-         * If this returns true, the activity does not finish. This is
-         * the type of activities that use UI trickery, but must be cancelled
-         * manually!
-         */
-        bool never_completes() const;
+        std::string get_stop_phrase() const;
+
+        const translation &get_verb() const;
+
         int get_value( size_t index, int def = 0 ) const;
-        std::string get_str_value( size_t index, const std::string def = "" ) const;
+        std::string get_str_value( size_t index, const std::string &def = "" ) const;
+
+        /**
+         * Helper that returns an activity specific progress message.
+         */
+        cata::optional<std::string> get_progress_message( const avatar &u ) const;
+
         /**
          * If this returns true, the action can be continued without
          * starting from scratch again (see player::backlog). This is only
@@ -118,28 +127,46 @@ class player_activity : public JsonSerializer, public JsonDeserializer
          */
         bool is_suspendable() const;
 
-        using JsonSerializer::serialize;
-        void serialize( JsonOut &jsout ) const override;
-        using JsonDeserializer::deserialize;
-        void deserialize( JsonIn &jsin ) override;
+        void serialize( JsonOut &json ) const;
+        void deserialize( JsonIn &jsin );
+        // used to migrate the item indices to item_location
+        // obsolete after 0.F stable
+        void migrate_item_position( Character &guy );
+        /** Convert from the old enumeration to the new string_id */
+        void deserialize_legacy_type( int legacy_type, activity_id &dest );
+
+        /**
+         * Preform necessary initialization to start or resume the activity. Must be
+         * called whenever a Character starts a new activity.
+         * When resuming an activity, do not call activity_actor::start
+         */
+        void start_or_resume( Character &who, bool resuming );
 
         /**
          * Performs the activity for a single turn. If the activity is complete
          * at the end of the turn, do_turn also executes whatever actions, if
          * any, are needed to conclude the activity.
          */
-        void do_turn( player *p );
+        void do_turn( player &p );
 
         /**
-         * Returns true if the activity is complete.
+         * Performs activity-specific cleanup when Character::cancel_activity() is called
          */
-        bool is_complete() const;
+        void canceled( Character &who );
 
         /**
          * Returns true if activities are similar enough that this activity
          * can be resumed instead of starting the other activity.
          */
         bool can_resume_with( const player_activity &other, const Character &who ) const;
+
+        bool is_interruptible() const;
+        bool is_distraction_ignored( distraction_type ) const;
+        void ignore_distraction( distraction_type );
+        void allow_distractions();
+        void inherit_distractions( const player_activity & );
+
+        float exertion_level() const;
 };
 
-#endif
+#endif // CATA_SRC_PLAYER_ACTIVITY_H

@@ -1,12 +1,12 @@
 [
   {
     "type": "MOD_INFO",
-    "mod-type": "SUPPLEMENTAL",
-    "ident": "generic_guns",
+    "id": "generic_guns",
     "name": "Generic Guns",
-    "author": "nikheizen",
-    "description": "Replaces guns and ammo with generic types.",
+    "authors": [ "Tonkatsu" ],
+    "maintainers": [ "Tonkatsu" ],
+    "description": "Replaces guns and ammo with generic types.  Warning: can cause issues with other gun mods.",
     "category": "items",
-    "path": ""
+    "dependencies": [ "dda" ]
   }
 ]

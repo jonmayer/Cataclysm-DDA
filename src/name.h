@@ -1,73 +1,49 @@
-#ifndef NAME_H
-#define NAME_H
+#pragma once
+#ifndef CATA_SRC_NAME_H
+#define CATA_SRC_NAME_H
 
 #include <string>
-#include <vector>
-#include <map>
-#include <stdint.h>
 
-typedef enum {
-    nameIsMaleName = 1,
-    nameIsFemaleName = 2,
-    nameIsUnisexName = 3,
-    nameIsGivenName = 4,
-    nameIsFamilyName = 8,
-    nameIsTownName = 16,
-    nameIsFullName = 32,
-    nameIsWorldName = 64
-} nameFlags;
+#include "enum_traits.h"
 
-class NameGenerator;
-class JsonObject;
+template <typename E> struct enum_traits;
 
-class Name
-{
-    public:
-        Name();
-        Name( std::string name, uint32_t type );
-
-        static NameGenerator &generator();
-        static std::string generate( bool male );
-
-        static std::string get( uint32_t searchFlags );
-
-        std::string value() const {
-            return _value;
-        }
-        uint32_t type() const {
-            return _type;
-        }
-
-    private:
-        std::string _value;
-        uint32_t _type;
+/// @brief types of proper noun tables
+enum class nameFlags : int {
+    /// Masculine first names, also used for Unisex
+    IsMaleName   = 1 << 0,
+    /// Feminine first names, also used for Unisex
+    IsFemaleName = 1 << 1,
+    IsUnisexName = IsMaleName | IsFemaleName,
+    IsGivenName  = 1 << 2,
+    IsFamilyName = 1 << 3,
+    IsNickName   = 1 << 4,
+    /// Names of cities and towns in game
+    IsTownName   = 1 << 5,
+    /// Full names of crowdfunding donors
+    IsFullName   = 1 << 6,
+    /// Name belongs to list for world config saves. Seen in start menu.
+    IsWorldName  = 1 << 7
 };
 
-class NameGenerator
-{
-    public:
-        static NameGenerator &generator() {
-            static NameGenerator generator;
-
-            return generator;
-        }
-
-        void load_name( JsonObject &jo );
-
-        std::string generateName( bool male );
-
-        std::string getName( uint32_t searchFlags );
-        void clear_names();
-    private:
-        NameGenerator();
-
-        NameGenerator( NameGenerator const & );
-        void operator=( NameGenerator const & );
-        std::vector<uint32_t> uint32_tsFromFlags( uint32_t searchFlags ) const;
-
-        std::map< uint32_t, std::vector<Name> > names;
+template<>
+struct enum_traits<nameFlags> {
+    static constexpr bool is_flag_enum = true;
 };
 
-void load_names_from_file( const std::string &filename );
+namespace Name
+{
+/// Load names from given json file to use for generation
+void load_from_file( const std::string &filename );
 
-#endif
+/// Return a random name given search flags
+std::string get( nameFlags searchFlags );
+
+/// Return a random full name given gender
+std::string generate( bool is_male );
+
+/// Clear names used for generation
+void clear();
+} // namespace Name
+
+#endif // CATA_SRC_NAME_H

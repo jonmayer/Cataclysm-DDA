@@ -1,50 +1,55 @@
-#ifndef NPC_CLASS_H
-#define NPC_CLASS_H
+#pragma once
+#ifndef CATA_SRC_NPC_CLASS_H
+#define CATA_SRC_NPC_CLASS_H
 
-#include <vector>
-#include <map>
-#include <array>
-#include <random>
+#include <algorithm>
 #include <functional>
+#include <map>
+#include <string>
+#include <vector>
 
 #include "string_id.h"
+#include "translations.h"
+#include "type_id.h"
 
 class JsonObject;
+class Trait_group;
 
-class npc_class;
-using npc_class_id = string_id<npc_class>;
+namespace trait_group
+{
 
-class Skill;
-using skill_id = string_id<Skill>;
+using Trait_group_tag = string_id<Trait_group>;
 
-typedef std::string Group_tag;
+} // namespace trait_group
 
-// @todo Move to better suited file (rng.h/.cpp?)
+// TODO: Move to better suited file (rng.h/.cpp?)
 class distribution
 {
     private:
         std::function<float()> generator_function;
-        distribution( std::function<float()> gen );
+        distribution( const std::function<float()> &gen );
 
     public:
         distribution();
+        distribution( const distribution & );
 
         float roll() const;
 
         distribution operator+( const distribution &other ) const;
         distribution operator*( const distribution &other ) const;
+        distribution &operator=( const distribution &other );
 
         static distribution constant( float val );
         static distribution rng_roll( int from, int to );
-        static distribution dice_roll( int sides, int sizes );
+        static distribution dice_roll( int sides, int size );
         static distribution one_in( float in );
 };
 
 class npc_class
 {
     private:
-        std::string name;
-        std::string job_description;
+        translation name;
+        translation job_description;
 
         bool common = true;
 
@@ -57,16 +62,26 @@ class npc_class
         // Just for finalization
         std::map<skill_id, distribution> bonus_skills;
 
-        Group_tag shopkeeper_item_group = "EMPTY_GROUP";
+        item_group_id shopkeeper_item_group = item_group_id( "EMPTY_GROUP" );
 
     public:
         npc_class_id id;
-        bool was_loaded;
+        bool was_loaded = false;
 
+        item_group_id worn_override;
+        item_group_id carry_override;
+        item_group_id weapon_override;
+
+        std::map<mutation_category_id, distribution> mutation_rounds;
+        trait_group::Trait_group_tag traits = trait_group::Trait_group_tag( "EMPTY_GROUP" );
+        // the int is what level the spell starts at
+        std::map<spell_id, int> _starting_spells;
+        std::map<bionic_id, int> bionic_list;
+        std::vector<proficiency_id> _starting_proficiencies;
         npc_class();
 
-        const std::string &get_name() const;
-        const std::string &get_job_description() const;
+        std::string get_name() const;
+        std::string get_job_description() const;
 
         int roll_strength() const;
         int roll_dexterity() const;
@@ -75,15 +90,15 @@ class npc_class
 
         int roll_skill( const skill_id & ) const;
 
-        const Group_tag &get_shopkeeper_items() const;
+        const item_group_id &get_shopkeeper_items() const;
 
-        void load( JsonObject &jo );
+        void load( const JsonObject &jo, const std::string &src );
 
         static const npc_class_id &from_legacy_int( int i );
 
         static const npc_class_id &random_common();
 
-        static void load_npc_class( JsonObject &jo );
+        static void load_npc_class( const JsonObject &jo, const std::string &src );
 
         static const std::vector<npc_class> &get_all();
 
@@ -94,23 +109,25 @@ class npc_class
         static void check_consistency();
 };
 
-// @todo Get rid of that
-extern npc_class_id NC_NONE;
-extern npc_class_id NC_EVAC_SHOPKEEP;
-extern npc_class_id NC_SHOPKEEP;
-extern npc_class_id NC_HACKER;
-extern npc_class_id NC_DOCTOR;
-extern npc_class_id NC_TRADER;
-extern npc_class_id NC_NINJA;
-extern npc_class_id NC_COWBOY;
-extern npc_class_id NC_SCIENTIST;
-extern npc_class_id NC_BOUNTY_HUNTER;
-extern npc_class_id NC_THUG;
-extern npc_class_id NC_SCAVENGER;
-extern npc_class_id NC_ARSONIST;
-extern npc_class_id NC_HUNTER;
-extern npc_class_id NC_SOLDIER;
-extern npc_class_id NC_BARTENDER;
-extern npc_class_id NC_JUNK_SHOPKEEP;
+// TODO: Get rid of that
+extern const npc_class_id NC_NONE;
+extern const npc_class_id NC_EVAC_SHOPKEEP;
+extern const npc_class_id NC_SHOPKEEP;
+extern const npc_class_id NC_HACKER;
+extern const npc_class_id NC_CYBORG;
+extern const npc_class_id NC_DOCTOR;
+extern const npc_class_id NC_TRADER;
+extern const npc_class_id NC_NINJA;
+extern const npc_class_id NC_COWBOY;
+extern const npc_class_id NC_SCIENTIST;
+extern const npc_class_id NC_BOUNTY_HUNTER;
+extern const npc_class_id NC_THUG;
+extern const npc_class_id NC_SCAVENGER;
+extern const npc_class_id NC_ARSONIST;
+extern const npc_class_id NC_HUNTER;
+extern const npc_class_id NC_SOLDIER;
+extern const npc_class_id NC_BARTENDER;
+extern const npc_class_id NC_JUNK_SHOPKEEP;
+extern const npc_class_id NC_HALLU;
 
-#endif
+#endif // CATA_SRC_NPC_CLASS_H

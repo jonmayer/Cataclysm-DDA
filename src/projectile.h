@@ -1,23 +1,25 @@
-#ifndef PROJECTILE_H
-#define PROJECTILE_H
+#pragma once
+#ifndef CATA_SRC_PROJECTILE_H
+#define CATA_SRC_PROJECTILE_H
 
-#include "enums.h"
-#include "damage.h"
-#include <string>
-#include <vector>
-#include <set>
 #include <memory>
+#include <set>
+#include <string>
 
-struct itype;
-struct explosion_data;
+#include "damage.h"
+#include "point.h"
+
 class Creature;
+struct explosion_data;
+class item;
 
 struct projectile {
         damage_instance impact;
         // how hard is it to dodge? essentially rolls to-hit,
         // bullets have arbitrarily high values but thrown objects have dodgeable values.
-        int speed;
-        int range;
+        int speed = 0;
+        int range = 0;
+        float critical_multiplier = 0.0f;
 
         std::set<std::string> proj_effects;
 
@@ -37,7 +39,7 @@ struct projectile {
 
         projectile();
         projectile( const projectile & );
-        projectile( projectile && ) = default;
+        projectile( projectile && );
         projectile &operator=( const projectile & );
         ~projectile();
 
@@ -57,6 +59,6 @@ struct dealt_projectile_attack {
 };
 
 void apply_ammo_effects( const tripoint &p, const std::set<std::string> &effects );
-int aoe_size( const std::set<std::string> &effects );
+int max_aoe_size( const std::set<std::string> &tags );
 
-#endif
+#endif // CATA_SRC_PROJECTILE_H

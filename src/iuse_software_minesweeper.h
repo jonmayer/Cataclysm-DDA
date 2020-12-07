@@ -1,23 +1,31 @@
-#ifndef SOFTWARE_MINESWEEPER_H
-#define SOFTWARE_MINESWEEPER_H
+#pragma once
+#ifndef CATA_SRC_IUSE_SOFTWARE_MINESWEEPER_H
+#define CATA_SRC_IUSE_SOFTWARE_MINESWEEPER_H
 
-#include "cursesdef.h"
 #include <map>
+
+#include "point.h"
+
+namespace catacurses
+{
+class window;
+} // namespace catacurses
 
 class minesweeper_game
 {
     private:
         bool check_win();
-        void new_level( WINDOW *w_minesweeper );
-        int iMaxX, iMaxY, iMinX, iMinY;
-        int iLevelX, iLevelY;
-        int iOffsetX, iOffsetY;
-        int iBombs;
+        void new_level();
+        point max;
+        point min;
+        point level;
+        point offset;
+        int iBombs = 0;
 
         std::map<int, std::map<int, int> > mLevel;
+        static constexpr int bomb = -1;
 
         enum reveal {
-            bomb = -1,
             unknown,
             flag,
             seen
@@ -30,4 +38,4 @@ class minesweeper_game
         minesweeper_game();
 };
 
-#endif
+#endif // CATA_SRC_IUSE_SOFTWARE_MINESWEEPER_H

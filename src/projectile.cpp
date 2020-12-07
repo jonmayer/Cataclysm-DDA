@@ -1,22 +1,30 @@
 #include "projectile.h"
 
-#include "game.h"
+#include <algorithm>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include "ammo_effect.h"
+#include "explosion.h"
+#include "item.h"
 #include "map.h"
 #include "map_iterator.h"
-#include "explosion.h"
-#include "field.h"
+#include "messages.h"
+#include "rng.h"
+#include "string_id.h"
 
 projectile::projectile() :
-    speed( 0 ), range( 0 ), drop( nullptr ), custom_explosion( nullptr )
+    critical_multiplier( 2.0 ), drop( nullptr ), custom_explosion( nullptr )
 { }
 
-projectile::~projectile()
-{
-}
+projectile::~projectile() = default;
+
+projectile::projectile( projectile && ) = default;
 
 projectile::projectile( const projectile &other )
 {
-    ( *this ) = other;
+    *this = other;
 }
 
 projectile &projectile::operator=( const projectile &other )
@@ -25,6 +33,7 @@ projectile &projectile::operator=( const projectile &other )
     speed = other.speed;
     range = other.range;
     proj_effects = other.proj_effects;
+    critical_multiplier = other.critical_multiplier;
     set_drop( other.get_drop() );
     set_custom_explosion( other.get_custom_explosion() );
 
@@ -46,7 +55,7 @@ void projectile::set_drop( const item &it )
     if( it.is_null() ) {
         unset_drop();
     } else {
-        drop.reset( new item( it ) );
+        drop = std::make_unique<item>( it );
     }
 }
 
@@ -55,7 +64,7 @@ void projectile::set_drop( item &&it )
     if( it.is_null() ) {
         unset_drop();
     } else {
-        drop.reset( new item( std::move( it ) ) );
+        drop = std::make_unique<item>( std::move( it ) );
     }
 }
 
@@ -76,7 +85,7 @@ const explosion_data &projectile::get_custom_explosion() const
 
 void projectile::set_custom_explosion( const explosion_data &ex )
 {
-    custom_explosion.reset( new explosion_data( ex ) );
+    custom_explosion = std::make_unique<explosion_data>( ex );
 }
 
 void projectile::unset_custom_explosion()
@@ -84,144 +93,72 @@ void projectile::unset_custom_explosion()
     custom_explosion.reset();
 }
 
+static void foamcrete_build( const tripoint &p )
+{
+    map &here = get_map();
+    const ter_str_id floor = ter_str_id( "t_foamcrete_floor" );
+    const ter_str_id wall = ter_str_id( "t_foamcrete_wall" );
+    const field_type_str_id field_fd_foamcrete( "fd_foamcrete" );
+
+    if( !( wall.is_valid() && floor.is_valid() && field_fd_foamcrete.is_valid() ) ) {
+        debugmsg( "Foamcrete terrains or fields are missing" );
+        return;
+    }
+
+    if( here.has_flag_ter( TFLAG_NO_FLOOR, p ) ) {
+        for( const tripoint &ep : here.points_in_radius( p, 1 ) ) {
+            if( here.has_flag_ter( TFLAG_SUPPORTS_ROOF, ep ) ) {
+                here.ter_set( p, floor );
+                here.add_field( p, field_fd_foamcrete, 1 );
+                return;
+            }
+        }
+        add_msg( m_bad, _( "The foamcrete falls without a wall to anchor against." ) );
+    } else if( here.get_field_intensity( p, field_fd_foamcrete ) >= 2 ) {
+        here.bash( p, 9001, false, true, false );
+        here.ter_set( p, wall );
+    } else {
+        here.add_field( p, field_fd_foamcrete, 1 );
+    }
+}
+
 void apply_ammo_effects( const tripoint &p, const std::set<std::string> &effects )
 {
-    if( effects.count( "EXPLOSIVE_SMALL" ) > 0 ) {
-        g->explosion( p, 24, 0.4 );
-    }
-
-    if( effects.count( "EXPLOSIVE" ) > 0 ) {
-        g->explosion( p, 24 );
-    }
-
-    if( effects.count( "FRAG" ) > 0 ) {
-        explosion_data frag;
-        frag.power = 1.0f;
-        frag.shrapnel.count = 50;
-        frag.shrapnel.mass = 5;
-        frag.shrapnel.recovery = 100;
-        frag.shrapnel.drop = "shrapnel";
-        g->explosion( p, frag );
-    }
-
-    if( effects.count( "NAPALM" ) > 0 ) {
-        g->explosion( p, 4, 0.7, true );
-        // More intense fire near the center
-        for( auto && pt : g->m.points_in_radius( p, 1, 0 ) ) {
-            g->m.add_field( pt, fd_fire, 1, 0 );
-        }
-    }
-
-    if( effects.count( "NAPALM_BIG" ) > 0 ) {
-        g->explosion( p, 24, 0.8, true );
-        // More intense fire near the center
-        for( auto && pt : g->m.points_in_radius( p, 3, 0 ) ) {
-            g->m.add_field( pt, fd_fire, 1, 0 );
-        }
-    }
-
-    if( effects.count( "MININUKE_MOD" ) > 0 ) {
-        g->explosion( p, 450 );
-        for( auto && pt : g->m.points_in_radius( p, 6, 0 ) ) {
-            if( g->m.sees( p, pt, 3 ) &&
-                g->m.passable( pt ) ) {
-                g->m.add_field( pt, fd_nuke_gas, 3, 0 );
+    map &here = get_map();
+    for( const ammo_effect &ae : ammo_effects::get_all() ) {
+        if( effects.count( ae.id.str() ) > 0 ) {
+            for( const tripoint &pt : here.points_in_radius( p, ae.aoe_radius, ae.aoe_radius_z ) ) {
+                if( x_in_y( ae.aoe_chance, 100 ) ) {
+                    const bool check_sees = !ae.aoe_check_sees || here.sees( p, pt, ae.aoe_check_sees_radius );
+                    const bool check_passable = !ae.aoe_check_passable || here.passable( pt );
+                    if( check_sees && check_passable ) {
+                        here.add_field( pt, ae.aoe_field_type, rng( ae.aoe_intensity_min, ae.aoe_intensity_max ) );
+                    }
+                }
             }
-        }
-    }
-
-    if( effects.count( "ACIDBOMB" ) > 0 ) {
-        for( auto && pt : g->m.points_in_radius( p, 1, 0 ) ) {
-            g->m.add_field( pt, fd_acid, 3, 0 );
-        }
-    }
-
-    if( effects.count( "EXPLOSIVE_BIG" ) > 0 ) {
-        g->explosion( p, 40 );
-    }
-
-    if( effects.count( "EXPLOSIVE_HUGE" ) > 0 ) {
-        g->explosion( p, 80 );
-    }
-
-    if( effects.count( "TOXICGAS" ) > 0 ) {
-        for( auto && pt : g->m.points_in_radius( p, 1, 0 ) ) {
-            g->m.add_field( pt, fd_toxic_gas, 3, 0 );
-        }
-    }
-    if( effects.count( "TEARGAS" ) > 0 ) {
-        for( auto && pt : g->m.points_in_radius( p, 2, 0 ) ) {
-            g->m.add_field( pt, fd_tear_gas, 3, 0 );
-        }
-    }
-    if( effects.count( "GAS_FUNGICIDAL" ) > 0 ) {
-        for( auto && pt : g->m.points_in_radius( p, 1, 0 ) ) {
-            g->m.add_field( pt, fd_fungicidal_gas, 3, 0 );
-        }
-    }
-    if( effects.count( "SMOKE" ) > 0 ) {
-        for( auto &pt : g->m.points_in_radius( p, 1, 0 ) ) {
-            g->m.add_field( pt, fd_smoke, MAX_FIELD_DENSITY );
-        }
-    }
-    if( effects.count( "SMOKE_BIG" ) > 0 ) {
-        for( auto &pt : g->m.points_in_radius( p, 6, 0 ) ) {
-            g->m.add_field( pt, fd_smoke, MAX_FIELD_DENSITY );
-        }
-    }
-
-    if( effects.count( "FLASHBANG" ) ) {
-        g->flashbang( p );
-    }
-
-    if( effects.count( "EMP" ) ) {
-        g->emp_blast( p );
-    }
-
-    if( effects.count( "NO_BOOM" ) == 0 && effects.count( "FLAME" ) > 0 ) {
-        for( auto && pt : g->m.points_in_radius( p, 1, 0 ) ) {
-            g->m.add_field( pt, fd_fire, 1, 0 );
-        }
-    }
-
-    if( effects.count( "FLARE" ) > 0 ) {
-        g->m.add_field( p, fd_fire, 1, 0 );
-    }
-
-    if( effects.count( "LIGHTNING" ) > 0 ) {
-        for( auto && pt : g->m.points_in_radius( p, 1, 0 ) ) {
-            g->m.add_field( pt, fd_electricity, 3, 0 );
-        }
-    }
-
-    if( effects.count( "PLASMA" ) > 0 ) {
-        for( auto && pt : g->m.points_in_radius( p, 1, 0 ) ) {
-            if( one_in( 2 ) ) {
-                g->m.add_field( pt, fd_plasma, rng( 2, 3 ), 0 );
+            if( ae.aoe_explosion_data.power > 0 ) {
+                explosion_handler::explosion( p, ae.aoe_explosion_data );
+            }
+            if( ae.do_flashbang ) {
+                explosion_handler::flashbang( p );
+            }
+            if( ae.do_emp_blast ) {
+                explosion_handler::emp_blast( p );
+            }
+            if( ae.foamcrete_build ) {
+                foamcrete_build( p );
             }
         }
     }
 }
 
-
-int aoe_size( const std::set<std::string> &tags )
+int max_aoe_size( const std::set<std::string> &tags )
 {
-    if( tags.count( "NAPALM_BIG" ) ||
-        tags.count( "EXPLOSIVE_HUGE" ) ) {
-        return 4;
-    } else if( tags.count( "NAPALM" ) ||
-               tags.count( "EXPLOSIVE_BIG" ) ) {
-        return 3;
-    } else if( tags.count( "EXPLOSIVE" ) ||
-               tags.count( "EXPLOSIVE_SMALL" ) ||
-               tags.count( "FRAG" ) ) {
-        return 2;
-    } else if( tags.count( "ACIDBOMB" ) ||
-               tags.count( "FLAME" ) ) {
-        return 1;
+    int aoe_size = 0;
+    for( const ammo_effect &aed : ammo_effects::get_all() ) {
+        if( tags.count( aed.id.str() ) > 0 ) {
+            aoe_size = std::max( aoe_size,  aed.aoe_size ) ;
+        }
     }
-
-
-    return 0;
+    return aoe_size;
 }
-

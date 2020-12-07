@@ -1,9 +1,10 @@
-#ifndef INT_ID_H
-#define INT_ID_H
+#pragma once
+#ifndef CATA_SRC_INT_ID_H
+#define CATA_SRC_INT_ID_H
 
+#include <functional>
 #include <string>
 #include <type_traits>
-#include <functional>
 
 template<typename T>
 class string_id;
@@ -12,21 +13,28 @@ class string_id;
  * Just like the @ref string_id, this is a wrapper for int based identifiers.
  * The template parameter T specifies what kind of object it identifies (e.g. a trap type, monster
  * type, ...)
- *
+ * See `string_id` for documentation on usage.
  */
 template<typename T>
 class int_id
 {
     public:
-        typedef int_id<T> This;
+        using This = int_id<T>;
 
         /**
          * Explicit constructor to make it stand out in the code, so one can easily search for all
          * places that use it.
          */
-        explicit int_id( int const id )
+        explicit int_id( const int id )
             : _id( id ) {
         }
+
+        /**
+         * Prevent accidental construction from other int ids.
+         */
+        template < typename S, typename std::enable_if_t < !std::is_same<S, T>::value, int > = 0 >
+        int_id( const int_id<S> &id ) = delete;
+
         /**
          * Default constructor constructs a 0-id. No id value is special to this class, 0 as id
          * is just as normal as any other integer value.
@@ -79,14 +87,26 @@ class int_id
         /**
          * Conversion to int as with the @ref to_i function.
          */
-        operator int() const {
+        explicit operator int() const {
             return _id;
+        }
+
+        explicit operator bool() const {
+            return _id != 0;
         }
 
         // Those are optional, you need to implement them on your own if you want to use them.
         // If you don't implement them, but use them, you'll get a linker error.
         const string_id<T> &id() const;
         const T &obj() const;
+
+        const T &operator*() const {
+            return obj();
+        }
+
+        const T *operator->() const {
+            return &obj();
+        }
 
         /**
          * Returns whether this id is valid, that means whether it refers to an existing object.
@@ -102,10 +122,10 @@ namespace std
 {
 template<typename T>
 struct hash< int_id<T> > {
-    std::size_t operator()( const int_id<T> &v ) const {
+    std::size_t operator()( const int_id<T> &v ) const noexcept {
         return hash<int>()( v.to_i() );
     }
 };
-}
+} // namespace std
 
-#endif
+#endif // CATA_SRC_INT_ID_H

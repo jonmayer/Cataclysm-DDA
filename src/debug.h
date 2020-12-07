@@ -1,11 +1,8 @@
-#ifndef DEBUG_H
-#define DEBUG_H
+#pragma once
+#ifndef CATA_SRC_DEBUG_H
+#define CATA_SRC_DEBUG_H
 
-/**
- * Should a debugmsg result in an exception instead of a propmt?
- * Useful for preventing unit tests stalling waiting for keyboard input
- */
-extern bool debug_fatal;
+#include "string_formatter.h"
 
 /**
  *      debugmsg(msg, ...)
@@ -27,7 +24,7 @@ extern bool debug_fatal;
  * DebugLog always returns a stream that starts on a new line. Don't add a
  * newline at the end of your debug message.
  * If the specific debug level or class have been disabled, the message is
- * actually discarded, otherwise it is written to a log file (FILENAMES["debug"]).
+ * actually discarded, otherwise it is written to a log file.
  * If a single source file contains mostly messages for the same debug class
  * (e.g. mapgen.cpp), create and use the macro dbg.
  *
@@ -35,7 +32,9 @@ extern bool debug_fatal;
  * Usually a single source contains only debug messages for a single debug class
  * (e.g. mapgen.cpp contains only messages for D_MAP_GEN, npcmove.cpp only D_NPC).
  * Those files contain a macro at top:
-#define dbg(x) DebugLog((DebugLevel)(x), D_NPC) << __FILE__ << ":" << __LINE__ << ": "
+@code
+#define dbg(x) DebugLog((x), D_NPC) << __FILE__ << ":" << __LINE__ << ": "
+@endcode
  * It allows to call the debug system and just supply the debug level, the debug
  * class is automatically inserted as it is the same for the whole file. Also this
  * adds the file name and the line of the statement to the debug message.
@@ -48,7 +47,11 @@ extern bool debug_fatal;
 // Includes                                                         {{{1
 // ---------------------------------------------------------------------
 #include <iostream>
+#include <string>
+#include <type_traits>
+#include <utility>
 #include <vector>
+#include <functional>
 
 #define STRING2(x) #x
 #define STRING(x) STRING2(x)
@@ -68,8 +71,58 @@ extern bool debug_fatal;
 #define debugmsg(...) realDebugmsg(__FILE__, STRING(__LINE__), __FUNCTION_NAME__, __VA_ARGS__)
 
 // Don't use this, use debugmsg instead.
-void realDebugmsg( const char *filename, const char *line, const char *funcname, const char *mes,
-                   ... );
+void realDebugmsg( const char *filename, const char *line, const char *funcname,
+                   const std::string &text );
+template<typename ...Args>
+inline void realDebugmsg( const char *const filename, const char *const line,
+                          const char *const funcname, const char *const mes, Args &&... args )
+{
+    return realDebugmsg( filename, line, funcname, string_format( mes,
+                         std::forward<Args>( args )... ) );
+}
+
+// A fatal error for use in constexpr functions
+// This exists for compatibility reasons.  On gcc 5.3 we need a
+// different implementation that is messier.
+// https://gcc.gnu.org/bugzilla/show_bug.cgi?id=67371
+// Pass a placeholder return value to be used on gcc 5.3 (it won't
+// actually be returned, it's just needed for the type), and then
+// args as if to debugmsg for the remaining args.
+#if defined(__GNUC__) && __GNUC__ < 6
+#define constexpr_fatal(ret, ...) \
+    do { return false ? ( ret ) : ( abort(), ( ret ) ); } while(false)
+#else
+#define constexpr_fatal(ret, ...) \
+    do { debugmsg(__VA_ARGS__); abort(); } while(false)
+#endif
+
+/**
+ * Used to generate game report information.
+ */
+namespace game_info
+{
+/** Return the name of the current operating system.
+ */
+std::string operating_system();
+/** Return a detailed version of the operating system; e.g. "Ubuntu 18.04" or "(Windows) 10 1809".
+ */
+std::string operating_system_version();
+/** Return the "bitness" of the game (not necessarily of the operating system); either: 64-bit, 32-bit or Unknown.
+ */
+std::string bitness();
+/** Return the game version, as in the entry screen.
+ */
+std::string game_version();
+/** Return the underlying graphics version used by the game; either Tiles or Curses.
+*/
+std::string graphics_version();
+/** Return a list of the loaded mods, including the mod full name and its id name in brackets, e.g. "Dark Days Ahead [dda]".
+*/
+std::string mods_loaded();
+/** Generate a game report, including the information returned by all of the other functions.
+ */
+std::string game_report();
+} // namespace game_info
 
 // Enumerations                                                     {{{1
 // ---------------------------------------------------------------------
@@ -87,6 +140,12 @@ enum DebugLevel {
     DL_ALL = ( 1 << 5 ) - 1
 };
 
+inline DebugLevel operator|( DebugLevel l, DebugLevel r )
+{
+    return static_cast<DebugLevel>(
+               static_cast<std::underlying_type_t<DebugLevel>>( l ) | r );
+}
+
 /**
  * Debugging areas can be enabled for each of those areas separately.
  * If you add an entry, add an entry in that function:
@@ -101,7 +160,7 @@ enum DebugClass {
     D_MAP_GEN = 1 << 3,
     /** Main game class */
     D_GAME    = 1 << 4,
-    /** ncps*.cpp */
+    /** npcs*.cpp */
     D_NPC     = 1 << 5,
     /** SDL & tiles & anything graphical */
     D_SDL     = 1 << 6,
@@ -109,12 +168,17 @@ enum DebugClass {
     DC_ALL    = ( 1 << 30 ) - 1
 };
 
+enum class DebugOutput : int {
+    std_err,
+    file,
+};
+
 /** Initializes the debugging system, called exactly once from main() */
-void setupDebug();
+void setupDebug( DebugOutput );
 /** Opposite of setupDebug, shuts the debugging system down. */
 void deinitDebug();
 
-// Function Declatations                                            {{{1
+// Function Declarations                                            {{{1
 // ---------------------------------------------------------------------
 /**
  * Set debug levels that should be logged. bitmask is a OR-combined
@@ -129,33 +193,29 @@ void limitDebugLevel( int );
  */
 void limitDebugClass( int );
 
+/**
+ * @return true if any error has been logged in this run.
+ */
+bool debug_has_error_been_observed();
+
+/**
+ * Capturing debug messages during func execution,
+ * used to test debugmsg calls in the unit tests
+ * @return std::string debugmsg
+ */
+std::string capture_debugmsg_during( const std::function<void()> &func );
+
+/**
+ * Should be called after catacurses::stdscr is initialized.
+ * If catacurses::stdscr is available, shows all buffered debugmsg prompts.
+ */
+void replay_buffered_debugmsg_prompts();
+
 // Debug Only                                                       {{{1
 // ---------------------------------------------------------------------
 
 // See documentation at the top.
 std::ostream &DebugLog( DebugLevel, DebugClass );
-
-// OStream operators                                                {{{1
-// ---------------------------------------------------------------------
-
-template<typename C, typename A>
-std::ostream &operator<<( std::ostream &out, const std::vector<C, A> &elm )
-{
-    bool first = true;
-    for( typename std::vector<C>::const_iterator
-         it = elm.begin(),
-         end = elm.end();
-         it != end; ++it ) {
-        if( first ) {
-            first = false;
-        } else {
-            out << ",";
-        }
-        out << *it;
-    }
-
-    return out;
-}
 
 /**
  * Extended debugging mode, can be toggled during game.
@@ -164,5 +224,12 @@ std::ostream &operator<<( std::ostream &out, const std::vector<C, A> &elm )
  */
 extern bool debug_mode;
 
-// vim:tw=72:sw=1:fdm=marker:fdl=0:
+#if defined(BACKTRACE)
+/**
+ * Write a stack backtrace to the given ostream
+ */
+void debug_write_backtrace( std::ostream &out );
 #endif
+
+// vim:tw=72:sw=4:fdm=marker:fdl=0:
+#endif // CATA_SRC_DEBUG_H

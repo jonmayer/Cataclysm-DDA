@@ -1,11 +1,20 @@
-#ifndef SOFTWARE_SOKOBAN_H
-#define SOFTWARE_SOKOBAN_H
+#pragma once
+#ifndef CATA_SRC_IUSE_SOFTWARE_SOKOBAN_H
+#define CATA_SRC_IUSE_SOFTWARE_SOKOBAN_H
 
-#include "cursesdef.h"
-
+#include <cstddef>
+#include <iosfwd>
+#include <map>
 #include <string>
 #include <vector>
-#include <map>
+#include <utility>
+
+#include "point.h"
+
+namespace catacurses
+{
+class window;
+} // namespace catacurses
 
 class sokoban_game
 {
@@ -13,27 +22,24 @@ class sokoban_game
         class cUndo
         {
             public:
-                int iOldY;
-                int iOldX;
+                point old;
                 std::string sTileOld;
 
                 cUndo() {
-                    iOldY = 0;
-                    iOldX = 0;
+                    old = point_zero;
 
                     sTileOld = " ";
                 }
 
-                cUndo( const int arg_y, const int arg_x, const std::string arg_tile ) {
-                    iOldY = arg_y;
-                    iOldX = arg_x;
+                cUndo( const point &arg, const std::string &arg_tile ) {
+                    old = arg;
                     sTileOld = arg_tile;
                 }
-
-                ~cUndo() {};
         };
 
-        int iCurrentLevel, iNumLevel, iTotalMoves;
+        int iCurrentLevel = 0;
+        int iNumLevel = 0;
+        int iTotalMoves = 0;
         std::map<int, std::map<int, std::string> > mLevel;
         std::map<int, std::map<std::string, size_t> > mLevelInfo;
         std::vector<std::map<int, std::map<int, std::string> > > vLevel;
@@ -41,15 +47,14 @@ class sokoban_game
         std::vector<std::vector<std::pair<int, int> > > vLevelDone;
         std::map<int, bool> mAlreadyWon;
 
-        bool parse_level();
+        void parse_level( std::istream &fin );
         bool check_win();
-        int get_wall_connection( const int iY, const int iX );
-        void draw_level( WINDOW *w_sokoban );
-        void clear_level( WINDOW *w_sokoban );
-        void print_score( WINDOW *w_sokoban, int iScore, int iMoves );
+        int get_wall_connection( const point & );
+        void draw_level( const catacurses::window &w_sokoban );
+        void print_score( const catacurses::window &w_sokoban, int iScore, int iMoves );
     public:
         int start_game();
         sokoban_game();
 };
 
-#endif
+#endif // CATA_SRC_IUSE_SOFTWARE_SOKOBAN_H

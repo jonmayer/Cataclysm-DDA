@@ -1,8 +1,8 @@
-#ifndef ANIMATION_H
-#define ANIMATION_H
+#pragma once
+#ifndef CATA_SRC_ANIMATION_H
+#define CATA_SRC_ANIMATION_H
 
 #include "color.h"
-extern void try_sdl_update();
 
 enum explosion_neighbors {
     N_NO_NEIGHBORS = 0,
@@ -31,4 +31,4 @@ struct explosion_tile {
     nc_color color;
 };
 
-#endif
+#endif // CATA_SRC_ANIMATION_H
